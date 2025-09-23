@@ -54,22 +54,24 @@ func NewSegment(filename string) (*Segment, error) {
 		writer:     bufio.NewWriter(file),
 	}
 
-	var offset uint64 = 0
+	if stat.Size() != 0 {
+		var offset uint64 = 0
 
-	for {
-		entry, err := segment.readEntry(offset)
+		for {
+			entry, err := segment.readEntry(offset)
 
-		if err == io.EOF {
-			break
+			if err == io.EOF {
+				break
+			}
+
+			if err != nil {
+				break
+			}
+
+			segment.indexEnd = entry.Header.Index
+
+			offset = offset + EntryHeaderSize + entry.Header.Length
 		}
-
-		if err != nil {
-			break
-		}
-
-		segment.indexEnd = entry.Header.Index
-
-		offset = offset + EntryHeaderSize + entry.Header.Length
 	}
 
 	return segment, nil
@@ -95,6 +97,10 @@ func (s *Segment) Write(data []byte) (*Entry, error) {
 	if err := s.writer.Flush(); err != nil {
 		return nil, err
 	}
+
+	// if err := s.file.Sync(); err != nil {
+	// 	return nil, err
+	// }
 
 	s.indexEnd = entry.Header.Index
 	s.size += uint64(len(b))
