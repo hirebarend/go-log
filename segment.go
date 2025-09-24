@@ -2,6 +2,7 @@ package golog
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -77,12 +78,50 @@ func NewSegment(filename string) (*Segment, error) {
 	return segment, nil
 }
 
+func (s *Segment) Close() error {
+	if err := s.Commit(); err != nil {
+		return err
+	}
+
+	s.Writer = nil
+
+	if err := s.File.Close(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (s *Segment) Commit() error {
+	if s.File == nil {
+		return errors.New("File is not initialized")
+	}
+
+	if s.Writer == nil {
+		return errors.New("Writer is not initialized")
+	}
+
 	if err := s.Writer.Flush(); err != nil {
 		return err
 	}
 
 	if err := s.File.Sync(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Segment) Delete() error {
+	if s.File == nil {
+		return errors.New("File is not initialized")
+	}
+
+	if err := s.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Remove(s.File.Name()); err != nil {
 		return err
 	}
 
@@ -116,10 +155,8 @@ func (s *Segment) ReadAll() []*Entry {
 }
 
 func (s *Segment) Truncate(idx uint64) error {
-	if s.Writer != nil {
-		if err := s.Writer.Flush(); err != nil {
-			return err
-		}
+	if err := s.Commit(); err != nil {
+		return err
 	}
 
 	if idx < s.IndexStart || idx > s.IndexEnd {
@@ -156,9 +193,7 @@ func (s *Segment) Truncate(idx uint64) error {
 				s.IndexEnd = 0
 			}
 
-			if s.Writer != nil {
-				s.Writer.Reset(s.File)
-			}
+			s.Writer.Reset(s.File)
 
 			return nil
 		}
@@ -170,6 +205,10 @@ func (s *Segment) Truncate(idx uint64) error {
 }
 
 func (s *Segment) Write(data []byte) (*Entry, error) {
+	if s.Writer == nil {
+		return nil, errors.New("Writer is not initialized")
+	}
+
 	index := uint64(0)
 
 	if s.IndexEnd == 0 {
@@ -201,10 +240,8 @@ func (s *Segment) Write(data []byte) (*Entry, error) {
 }
 
 func (s *Segment) readEntry(offset uint64) (*Entry, error) {
-	if s.Writer != nil {
-		if err := s.Writer.Flush(); err != nil {
-			return nil, err
-		}
+	if err := s.Commit(); err != nil {
+		return nil, err
 	}
 
 	entryHeader, err := s.readEntryHeader(offset)
@@ -239,10 +276,8 @@ func (s *Segment) readEntry(offset uint64) (*Entry, error) {
 }
 
 func (s *Segment) readEntryHeader(offset uint64) (*EntryHeader, error) {
-	if s.Writer != nil {
-		if err := s.Writer.Flush(); err != nil {
-			return nil, err
-		}
+	if err := s.Commit(); err != nil {
+		return nil, err
 	}
 
 	if offset >= s.Size {

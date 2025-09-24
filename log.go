@@ -75,10 +75,8 @@ func (l *Log) TruncateFrom(index uint64) error {
 		segment := l.Segments[i]
 
 		if index < segment.IndexStart {
-			if segment.Writer != nil {
-				if err := segment.Writer.Flush(); err != nil {
-					return err
-				}
+			if err := segment.Commit(); err != nil {
+				return err
 			}
 
 			if err := segment.File.Close(); err != nil {
@@ -125,10 +123,8 @@ func (l *Log) TruncateTo(index uint64) error {
 
 	for i, segment := range l.Segments {
 		if segment.IndexEnd < index {
-			if segment.Writer != nil {
-				if err := segment.Writer.Flush(); err != nil {
-					return err
-				}
+			if err := segment.Commit(); err != nil {
+				return err
 			}
 
 			if err := segment.File.Close(); err != nil {
@@ -187,10 +183,8 @@ func (l *Log) TruncateTo(index uint64) error {
 			}
 		}
 
-		if segment.Writer != nil {
-			if err := segment.Writer.Flush(); err != nil {
-				return err
-			}
+		if err := segment.Commit(); err != nil {
+			return err
 		}
 
 		if err := segment.File.Close(); err != nil {
