@@ -13,5 +13,9 @@ func main() {
 
 	index, err := log.Write([]byte("Here is a string...."))
 
+	log.Commit()
+
+	log.Truncate(4166686)
+
 	fmt.Printf("%v | %v", index, err)
 }

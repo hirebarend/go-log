@@ -28,6 +28,12 @@ func BenchmarkWrite(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		log.Write([]byte(data[i%pool]))
+		_, err := log.Write([]byte(data[i%pool]))
+
+		if err != nil {
+			panic(err)
+		}
 	}
+
+	log.Commit()
 }

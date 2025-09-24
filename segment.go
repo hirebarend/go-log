@@ -48,7 +48,7 @@ func NewSegment(filename string) (*Segment, error) {
 
 	segment := &Segment{
 		file:       file,
-		indexEnd:   0,
+		indexEnd:   indexStart,
 		indexStart: indexStart,
 		size:       uint64(stat.Size()),
 		writer:     bufio.NewWriter(file),
@@ -77,6 +77,80 @@ func NewSegment(filename string) (*Segment, error) {
 	return segment, nil
 }
 
+func (s *Segment) Commit() error {
+	if err := s.writer.Flush(); err != nil {
+		return err
+	}
+
+	if err := s.file.Sync(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Segment) Truncate(idx uint64) error {
+	if s.writer != nil {
+		if err := s.writer.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if idx <= s.indexStart {
+		// TODO: throw error
+
+		return nil
+	}
+
+	if idx > s.indexEnd {
+		// TODO: throw error
+
+		return nil
+	}
+
+	var offset uint64 = 0
+
+	for {
+		entryHeader, err := s.readEntryHeader(offset)
+
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			return err
+		}
+
+		if entryHeader.Index >= idx {
+			if err := s.file.Truncate(int64(offset)); err != nil {
+				return err
+			}
+
+			if _, err := s.file.Seek(0, io.SeekEnd); err != nil {
+				return err
+			}
+
+			s.size = offset
+
+			if entryHeader.Index > 0 {
+				s.indexEnd = entryHeader.Index - 1
+			} else {
+				s.indexEnd = 0
+			}
+
+			if s.writer != nil {
+				s.writer.Reset(s.file)
+			}
+
+			return nil
+		}
+
+		offset = offset + EntryHeaderSize + entryHeader.Length
+	}
+
+	return nil
+}
+
 func (s *Segment) Write(data []byte) (*Entry, error) {
 	entry, err := NewEntry(data, s.indexEnd+1)
 
@@ -93,14 +167,6 @@ func (s *Segment) Write(data []byte) (*Entry, error) {
 	if _, err := s.writer.Write(b); err != nil {
 		return nil, err
 	}
-
-	if err := s.writer.Flush(); err != nil {
-		return nil, err
-	}
-
-	// if err := s.file.Sync(); err != nil {
-	// 	return nil, err
-	// }
 
 	s.indexEnd = entry.Header.Index
 	s.size += uint64(len(b))
