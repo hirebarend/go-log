@@ -2,7 +2,6 @@ package golog
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -10,18 +9,21 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type Segment struct {
 	File       *os.File
 	IndexEnd   uint64
 	IndexStart uint64
+	mu         sync.Mutex
+	Name       string
 	Size       uint64
 	Writer     *bufio.Writer
 }
 
-func NewSegment(filename string) (*Segment, error) {
-	base := filepath.Base(filename)
+func NewSegment(name string) (*Segment, error) {
+	base := filepath.Base(name)
 
 	indexStartStr := strings.TrimSuffix(base, filepath.Ext(base))
 
@@ -31,28 +33,17 @@ func NewSegment(filename string) (*Segment, error) {
 		return nil, err
 	}
 
-	file, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0o644)
-
-	if err != nil {
-		return nil, err
-	}
-
-	if _, err := file.Seek(0, io.SeekEnd); err != nil {
-		return nil, err
-	}
-
-	stat, err := file.Stat()
-
-	if err != nil {
-		return nil, err
-	}
-
 	segment := &Segment{
-		File:       file,
+		File:       nil,
 		IndexEnd:   0,
 		IndexStart: indexStart,
-		Size:       uint64(stat.Size()),
-		Writer:     bufio.NewWriter(file),
+		Name:       name,
+		Size:       0,
+		Writer:     nil,
+	}
+
+	if err := segment.open(); err != nil {
+		return nil, err
 	}
 
 	if segment.Size != 0 {
@@ -79,31 +70,48 @@ func NewSegment(filename string) (*Segment, error) {
 }
 
 func (s *Segment) Close() error {
-	if err := s.Commit(); err != nil {
-		return err
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.Writer != nil {
+		if err := s.Writer.Flush(); err != nil {
+			return err
+		}
 	}
 
 	s.Writer = nil
 
-	if err := s.File.Close(); err != nil {
-		return err
+	if s.File != nil {
+		if err := s.File.Close(); err != nil {
+			return err
+		}
+
+		s.File = nil
 	}
+
+	s.Size = 0
 
 	return nil
 }
 
 func (s *Segment) Commit() error {
-	if s.File == nil {
-		return errors.New("File is not initialized")
-	}
+	s.mu.Lock()
 
-	if s.Writer == nil {
-		return errors.New("Writer is not initialized")
-	}
+	if err := s.open(); err != nil {
+		s.mu.Unlock()
 
-	if err := s.Writer.Flush(); err != nil {
 		return err
 	}
+
+	if s.Writer != nil {
+		if err := s.Writer.Flush(); err != nil {
+			s.mu.Unlock()
+
+			return err
+		}
+	}
+
+	s.mu.Unlock()
 
 	if err := s.File.Sync(); err != nil {
 		return err
@@ -113,49 +121,54 @@ func (s *Segment) Commit() error {
 }
 
 func (s *Segment) Delete() error {
-	if s.File == nil {
-		return errors.New("File is not initialized")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.Writer != nil {
+		if err := s.Writer.Flush(); err != nil {
+			return err
+		}
 	}
 
-	if err := s.Close(); err != nil {
+	s.Writer = nil
+
+	if s.File != nil {
+		if err := s.File.Close(); err != nil {
+			return err
+		}
+
+		s.File = nil
+	}
+
+	if err := os.Remove(s.Name); err != nil {
 		return err
 	}
 
-	if err := os.Remove(s.File.Name()); err != nil {
+	s.Size = 0
+
+	return nil
+}
+
+func (s *Segment) Open() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.open(); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (s *Segment) ReadAll() []*Entry {
-	entries := []*Entry{}
+func (s *Segment) Truncate(idx uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	if s.Size != 0 {
-		var offset uint64 = 0
-
-		for {
-			entry, err := s.readEntry(offset)
-
-			if err == io.EOF {
-				break
-			}
-
-			if err != nil {
-				break
-			}
-
-			entries = append(entries, entry)
-
-			offset = offset + EntryHeaderSize + entry.Header.Length
-		}
+	if err := s.open(); err != nil {
+		return err
 	}
 
-	return entries
-}
-
-func (s *Segment) Truncate(idx uint64) error {
-	if err := s.Commit(); err != nil {
+	if err := s.Writer.Flush(); err != nil {
 		return err
 	}
 
@@ -205,8 +218,11 @@ func (s *Segment) Truncate(idx uint64) error {
 }
 
 func (s *Segment) Write(data []byte) (*Entry, error) {
-	if s.Writer == nil {
-		return nil, errors.New("Writer is not initialized")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.open(); err != nil {
+		return nil, err
 	}
 
 	index := uint64(0)
@@ -239,11 +255,36 @@ func (s *Segment) Write(data []byte) (*Entry, error) {
 	return entry, nil
 }
 
-func (s *Segment) readEntry(offset uint64) (*Entry, error) {
-	if err := s.Commit(); err != nil {
-		return nil, err
+func (s *Segment) open() error {
+	if s.File == nil {
+		file, err := os.OpenFile(s.Name, os.O_CREATE|os.O_RDWR, 0o644)
+
+		if err != nil {
+			return err
+		}
+
+		if _, err := file.Seek(0, io.SeekEnd); err != nil {
+			return err
+		}
+
+		stat, err := file.Stat()
+
+		if err != nil {
+			return err
+		}
+
+		s.File = file
+		s.Size = uint64(stat.Size())
 	}
 
+	if s.Writer == nil {
+		s.Writer = bufio.NewWriter(s.File)
+	}
+
+	return nil
+}
+
+func (s *Segment) readEntry(offset uint64) (*Entry, error) {
 	entryHeader, err := s.readEntryHeader(offset)
 
 	if err != nil {
@@ -276,10 +317,6 @@ func (s *Segment) readEntry(offset uint64) (*Entry, error) {
 }
 
 func (s *Segment) readEntryHeader(offset uint64) (*EntryHeader, error) {
-	if err := s.Commit(); err != nil {
-		return nil, err
-	}
-
 	if offset >= s.Size {
 		return nil, io.EOF
 	}
