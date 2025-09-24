@@ -89,7 +89,7 @@ func (s *Segment) Commit() error {
 	return nil
 }
 
-func (s *Segment) Truncate(idx uint64) error {
+func (s *Segment) TruncateFrom(idx uint64) error {
 	if s.writer != nil {
 		if err := s.writer.Flush(); err != nil {
 			return err
@@ -147,6 +147,55 @@ func (s *Segment) Truncate(idx uint64) error {
 
 		offset = offset + EntryHeaderSize + entryHeader.Length
 	}
+
+	return nil
+}
+
+func (s *Segment) TruncateTo(idx uint64) error {
+	if s.writer != nil {
+		if err := s.writer.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if idx < s.indexStart || idx > s.indexEnd {
+		return fmt.Errorf("truncate idx %d out of segment range [%d,%d]", idx, s.indexStart, s.indexEnd)
+	}
+
+	if idx == s.indexEnd {
+		return fmt.Errorf("truncate idx %d would empty segment", idx)
+	}
+
+	var offset uint64 = 0
+	var indexStart uint64 = 0
+
+	for {
+		hdr, err := s.readEntryHeader(offset)
+
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			return err
+		}
+
+		if hdr.Index > idx {
+			indexStart = hdr.Index
+
+			break
+		}
+
+		offset = offset + EntryHeaderSize + hdr.Length
+	}
+
+	err := s.truncateTo(offset)
+
+	if err != nil {
+		return err
+	}
+
+	s.indexStart = indexStart
 
 	return nil
 }
@@ -243,4 +292,64 @@ func (s *Segment) readEntryHeader(offset uint64) (*EntryHeader, error) {
 	entryHeader := NewEntryHeaderFromBytes(data)
 
 	return &entryHeader, nil
+}
+
+func (s *Segment) truncateTo(offset uint64) error {
+	if s.writer != nil {
+		if err := s.writer.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if offset > s.size {
+		return fmt.Errorf("offset %d beyond segment size %d", offset, s.size)
+	}
+
+	const chunk = 1 << 20 // 1 MiB
+	buf := make([]byte, chunk)
+
+	var readOffset = int64(offset)
+	var writeOffset int64 = 0
+	end := int64(s.size)
+
+	for readOffset < end {
+		toRead := chunk
+
+		if rem := int(end - readOffset); rem < toRead {
+			toRead = rem
+		}
+
+		n, err := s.file.ReadAt(buf[:toRead], readOffset)
+
+		if err != nil && err != io.EOF {
+			return err
+		}
+
+		if n == 0 {
+			break
+		}
+
+		if _, err := s.file.WriteAt(buf[:n], writeOffset); err != nil {
+			return err
+		}
+
+		readOffset += int64(n)
+		writeOffset += int64(n)
+	}
+
+	if err := s.file.Truncate(writeOffset); err != nil {
+		return err
+	}
+
+	if _, err := s.file.Seek(0, io.SeekEnd); err != nil {
+		return err
+	}
+
+	s.size = uint64(writeOffset)
+
+	if s.writer != nil {
+		s.writer.Reset(s.file)
+	}
+
+	return nil
 }

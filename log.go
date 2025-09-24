@@ -63,7 +63,7 @@ func (l *Log) Load() error {
 	return err
 }
 
-func (l *Log) Truncate(index uint64) error {
+func (l *Log) TruncateFrom(index uint64) error {
 	if len(l.segments) == 0 {
 		return nil
 	}
@@ -94,7 +94,7 @@ func (l *Log) Truncate(index uint64) error {
 		}
 
 		if index > segment.indexStart && index <= segment.indexEnd {
-			if err := segment.Truncate(index); err != nil {
+			if err := segment.TruncateFrom(index); err != nil {
 				return err
 			}
 
