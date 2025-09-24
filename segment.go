@@ -12,11 +12,11 @@ import (
 )
 
 type Segment struct {
-	file       *os.File
-	indexEnd   uint64
-	indexStart uint64
-	size       uint64
-	writer     *bufio.Writer
+	File       *os.File
+	IndexEnd   uint64
+	IndexStart uint64
+	Size       uint64
+	Writer     *bufio.Writer
 }
 
 func NewSegment(filename string) (*Segment, error) {
@@ -47,14 +47,14 @@ func NewSegment(filename string) (*Segment, error) {
 	}
 
 	segment := &Segment{
-		file:       file,
-		indexEnd:   indexStart,
-		indexStart: indexStart,
-		size:       uint64(stat.Size()),
-		writer:     bufio.NewWriter(file),
+		File:       file,
+		IndexEnd:   0,
+		IndexStart: indexStart,
+		Size:       uint64(stat.Size()),
+		Writer:     bufio.NewWriter(file),
 	}
 
-	if stat.Size() != 0 {
+	if segment.Size != 0 {
 		var offset uint64 = 0
 
 		for {
@@ -68,7 +68,7 @@ func NewSegment(filename string) (*Segment, error) {
 				break
 			}
 
-			segment.indexEnd = entry.Header.Index
+			segment.IndexEnd = entry.Header.Index
 
 			offset = offset + EntryHeaderSize + entry.Header.Length
 		}
@@ -78,34 +78,52 @@ func NewSegment(filename string) (*Segment, error) {
 }
 
 func (s *Segment) Commit() error {
-	if err := s.writer.Flush(); err != nil {
+	if err := s.Writer.Flush(); err != nil {
 		return err
 	}
 
-	if err := s.file.Sync(); err != nil {
+	if err := s.File.Sync(); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (s *Segment) TruncateFrom(idx uint64) error {
-	if s.writer != nil {
-		if err := s.writer.Flush(); err != nil {
+func (s *Segment) ReadAll() []*Entry {
+	entries := []*Entry{}
+
+	if s.Size != 0 {
+		var offset uint64 = 0
+
+		for {
+			entry, err := s.readEntry(offset)
+
+			if err == io.EOF {
+				break
+			}
+
+			if err != nil {
+				break
+			}
+
+			entries = append(entries, entry)
+
+			offset = offset + EntryHeaderSize + entry.Header.Length
+		}
+	}
+
+	return entries
+}
+
+func (s *Segment) Truncate(idx uint64) error {
+	if s.Writer != nil {
+		if err := s.Writer.Flush(); err != nil {
 			return err
 		}
 	}
 
-	if idx <= s.indexStart {
-		// TODO: throw error
-
-		return nil
-	}
-
-	if idx > s.indexEnd {
-		// TODO: throw error
-
-		return nil
+	if idx < s.IndexStart || idx > s.IndexEnd {
+		return fmt.Errorf("truncate idx %d out of segment range [%d,%d]", idx, s.IndexStart, s.IndexEnd)
 	}
 
 	var offset uint64 = 0
@@ -121,25 +139,25 @@ func (s *Segment) TruncateFrom(idx uint64) error {
 			return err
 		}
 
-		if entryHeader.Index >= idx {
-			if err := s.file.Truncate(int64(offset)); err != nil {
+		if entryHeader.Index > idx {
+			if err := s.File.Truncate(int64(offset)); err != nil {
 				return err
 			}
 
-			if _, err := s.file.Seek(0, io.SeekEnd); err != nil {
+			if _, err := s.File.Seek(0, io.SeekEnd); err != nil {
 				return err
 			}
 
-			s.size = offset
+			s.Size = offset
 
 			if entryHeader.Index > 0 {
-				s.indexEnd = entryHeader.Index - 1
+				s.IndexEnd = entryHeader.Index - 1
 			} else {
-				s.indexEnd = 0
+				s.IndexEnd = 0
 			}
 
-			if s.writer != nil {
-				s.writer.Reset(s.file)
+			if s.Writer != nil {
+				s.Writer.Reset(s.File)
 			}
 
 			return nil
@@ -151,57 +169,16 @@ func (s *Segment) TruncateFrom(idx uint64) error {
 	return nil
 }
 
-func (s *Segment) TruncateTo(idx uint64) error {
-	if s.writer != nil {
-		if err := s.writer.Flush(); err != nil {
-			return err
-		}
-	}
-
-	if idx < s.indexStart || idx > s.indexEnd {
-		return fmt.Errorf("truncate idx %d out of segment range [%d,%d]", idx, s.indexStart, s.indexEnd)
-	}
-
-	if idx == s.indexEnd {
-		return fmt.Errorf("truncate idx %d would empty segment", idx)
-	}
-
-	var offset uint64 = 0
-	var indexStart uint64 = 0
-
-	for {
-		hdr, err := s.readEntryHeader(offset)
-
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
-			return err
-		}
-
-		if hdr.Index > idx {
-			indexStart = hdr.Index
-
-			break
-		}
-
-		offset = offset + EntryHeaderSize + hdr.Length
-	}
-
-	err := s.truncateTo(offset)
-
-	if err != nil {
-		return err
-	}
-
-	s.indexStart = indexStart
-
-	return nil
-}
-
 func (s *Segment) Write(data []byte) (*Entry, error) {
-	entry, err := NewEntry(data, s.indexEnd+1)
+	index := uint64(0)
+
+	if s.IndexEnd == 0 {
+		index = s.IndexStart
+	} else {
+		index = s.IndexEnd + 1
+	}
+
+	entry, err := NewEntry(data, index)
 
 	if err != nil {
 		return nil, err
@@ -213,19 +190,19 @@ func (s *Segment) Write(data []byte) (*Entry, error) {
 		return nil, err
 	}
 
-	if _, err := s.writer.Write(b); err != nil {
+	if _, err := s.Writer.Write(b); err != nil {
 		return nil, err
 	}
 
-	s.indexEnd = entry.Header.Index
-	s.size += uint64(len(b))
+	s.IndexEnd = entry.Header.Index
+	s.Size += uint64(len(b))
 
 	return entry, nil
 }
 
 func (s *Segment) readEntry(offset uint64) (*Entry, error) {
-	if s.writer != nil {
-		if err := s.writer.Flush(); err != nil {
+	if s.Writer != nil {
+		if err := s.Writer.Flush(); err != nil {
 			return nil, err
 		}
 	}
@@ -237,7 +214,7 @@ func (s *Segment) readEntry(offset uint64) (*Entry, error) {
 	}
 
 	data := make([]byte, entryHeader.Length)
-	n, err := s.file.ReadAt(data, int64(offset+EntryHeaderSize))
+	n, err := s.File.ReadAt(data, int64(offset+EntryHeaderSize))
 
 	if err != nil {
 		if err == io.EOF && n == int(entryHeader.Length) {
@@ -262,18 +239,18 @@ func (s *Segment) readEntry(offset uint64) (*Entry, error) {
 }
 
 func (s *Segment) readEntryHeader(offset uint64) (*EntryHeader, error) {
-	if s.writer != nil {
-		if err := s.writer.Flush(); err != nil {
+	if s.Writer != nil {
+		if err := s.Writer.Flush(); err != nil {
 			return nil, err
 		}
 	}
 
-	if offset >= s.size {
+	if offset >= s.Size {
 		return nil, io.EOF
 	}
 
 	data := make([]byte, EntryHeaderSize)
-	n, err := s.file.ReadAt(data, int64(offset))
+	n, err := s.File.ReadAt(data, int64(offset))
 
 	if err != nil {
 		if err == io.EOF && n == 0 {
@@ -292,64 +269,4 @@ func (s *Segment) readEntryHeader(offset uint64) (*EntryHeader, error) {
 	entryHeader := NewEntryHeaderFromBytes(data)
 
 	return &entryHeader, nil
-}
-
-func (s *Segment) truncateTo(offset uint64) error {
-	if s.writer != nil {
-		if err := s.writer.Flush(); err != nil {
-			return err
-		}
-	}
-
-	if offset > s.size {
-		return fmt.Errorf("offset %d beyond segment size %d", offset, s.size)
-	}
-
-	const chunk = 1 << 20 // 1 MiB
-	buf := make([]byte, chunk)
-
-	var readOffset = int64(offset)
-	var writeOffset int64 = 0
-	end := int64(s.size)
-
-	for readOffset < end {
-		toRead := chunk
-
-		if rem := int(end - readOffset); rem < toRead {
-			toRead = rem
-		}
-
-		n, err := s.file.ReadAt(buf[:toRead], readOffset)
-
-		if err != nil && err != io.EOF {
-			return err
-		}
-
-		if n == 0 {
-			break
-		}
-
-		if _, err := s.file.WriteAt(buf[:n], writeOffset); err != nil {
-			return err
-		}
-
-		readOffset += int64(n)
-		writeOffset += int64(n)
-	}
-
-	if err := s.file.Truncate(writeOffset); err != nil {
-		return err
-	}
-
-	if _, err := s.file.Seek(0, io.SeekEnd); err != nil {
-		return err
-	}
-
-	s.size = uint64(writeOffset)
-
-	if s.writer != nil {
-		s.writer.Reset(s.file)
-	}
-
-	return nil
 }
