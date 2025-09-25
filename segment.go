@@ -13,13 +13,14 @@ import (
 )
 
 type Segment struct {
-	File       *os.File
-	IndexEnd   uint64
-	IndexStart uint64
-	mu         sync.Mutex
-	Name       string
-	Size       uint64
-	Writer     *bufio.Writer
+	File          *os.File
+	IndexCommited uint64
+	IndexEnd      uint64
+	IndexStart    uint64
+	mu            sync.Mutex
+	Name          string
+	Size          uint64
+	Writer        *bufio.Writer
 }
 
 func NewSegment(name string) (*Segment, error) {
@@ -34,12 +35,13 @@ func NewSegment(name string) (*Segment, error) {
 	}
 
 	segment := &Segment{
-		File:       nil,
-		IndexEnd:   0,
-		IndexStart: indexStart,
-		Name:       name,
-		Size:       0,
-		Writer:     nil,
+		File:          nil,
+		IndexCommited: 0,
+		IndexEnd:      0,
+		IndexStart:    indexStart,
+		Name:          name,
+		Size:          0,
+		Writer:        nil,
 	}
 
 	if err := segment.open(); err != nil {
@@ -60,6 +62,7 @@ func NewSegment(name string) (*Segment, error) {
 				break
 			}
 
+			segment.IndexCommited = entry.Header.Index
 			segment.IndexEnd = entry.Header.Index
 
 			offset = offset + EntryHeaderSize + entry.Header.Length
@@ -89,6 +92,8 @@ func (s *Segment) Close() error {
 		s.File = nil
 	}
 
+	s.IndexCommited = 0
+	s.IndexEnd = 0
 	s.Size = 0
 
 	return nil
@@ -96,6 +101,8 @@ func (s *Segment) Close() error {
 
 func (s *Segment) Commit() error {
 	s.mu.Lock()
+
+	indexCommitted := s.IndexEnd
 
 	if err := s.open(); err != nil {
 		s.mu.Unlock()
@@ -116,6 +123,12 @@ func (s *Segment) Commit() error {
 	if err := s.File.Sync(); err != nil {
 		return err
 	}
+
+	s.mu.Lock()
+	if indexCommitted > s.IndexCommited {
+		s.IndexCommited = indexCommitted
+	}
+	s.mu.Unlock()
 
 	return nil
 }
