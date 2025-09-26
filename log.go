@@ -53,7 +53,7 @@ func (l *Log) GetCommittedIndex() (uint64, error) {
 
 	l.mu.RUnlock()
 
-	return segment.IndexCommited, nil
+	return segment.CommittedIndex, nil
 }
 
 func (l *Log) Load() error {
@@ -76,7 +76,7 @@ func (l *Log) Load() error {
 	}
 
 	sort.Slice(segments, func(i, j int) bool {
-		return segments[i].IndexEnd < segments[j].IndexEnd
+		return segments[i].StartIndex < segments[j].StartIndex
 	})
 
 	l.mu.Lock()
@@ -100,7 +100,7 @@ func (l *Log) TruncateFrom(index uint64) error {
 	for i := len(l.Segments) - 1; i >= 0; i-- {
 		segment := l.Segments[i]
 
-		if index < segment.IndexStart {
+		if index < segment.StartIndex {
 			if err := segment.Delete(); err != nil {
 				l.mu.Unlock()
 
@@ -112,7 +112,7 @@ func (l *Log) TruncateFrom(index uint64) error {
 			continue
 		}
 
-		if index >= segment.IndexStart && index <= segment.IndexEnd {
+		if index >= segment.StartIndex && index <= segment.EndIndex {
 			if err := segment.Truncate(index); err != nil {
 				l.mu.Unlock()
 
@@ -124,7 +124,7 @@ func (l *Log) TruncateFrom(index uint64) error {
 			break
 		}
 
-		if index > segment.IndexEnd {
+		if index > segment.EndIndex {
 			cut = i + 1
 
 			break
@@ -150,7 +150,7 @@ func (l *Log) TruncateTo(index uint64) error {
 	var segments []*Segment
 
 	for i, segment := range l.Segments {
-		if segment.IndexEnd < index {
+		if segment.EndIndex < index {
 			if err := segment.Delete(); err != nil {
 				l.mu.Unlock()
 
@@ -160,7 +160,7 @@ func (l *Log) TruncateTo(index uint64) error {
 			continue
 		}
 
-		if segment.IndexStart >= index {
+		if segment.StartIndex >= index {
 			segments = append(segments, segment)
 
 			continue
@@ -258,7 +258,7 @@ func (l *Log) Write(data []byte) (uint64, error) {
 			return 0, err
 		}
 
-		newSegment, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", segment.IndexEnd+1)))
+		newSegment, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", segment.EndIndex+1)))
 
 		if err != nil {
 			return 0, err

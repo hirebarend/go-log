@@ -13,35 +13,35 @@ import (
 )
 
 type Segment struct {
-	File          *os.File
-	IndexCommited uint64
-	IndexEnd      uint64
-	IndexStart    uint64
-	mu            sync.Mutex
-	Name          string
-	Size          uint64
-	Writer        *bufio.Writer
+	File           *os.File
+	CommittedIndex uint64
+	EndIndex       uint64
+	mu             sync.Mutex
+	Name           string
+	Size           uint64
+	StartIndex     uint64
+	Writer         *bufio.Writer
 }
 
 func NewSegment(name string) (*Segment, error) {
 	base := filepath.Base(name)
 
-	indexStartStr := strings.TrimSuffix(base, filepath.Ext(base))
+	startIndexStr := strings.TrimSuffix(base, filepath.Ext(base))
 
-	indexStart, err := strconv.ParseUint(indexStartStr, 10, 64)
+	startIndex, err := strconv.ParseUint(startIndexStr, 10, 64)
 
 	if err != nil {
 		return nil, err
 	}
 
 	segment := &Segment{
-		File:          nil,
-		IndexCommited: indexStart,
-		IndexEnd:      0,
-		IndexStart:    indexStart,
-		Name:          name,
-		Size:          0,
-		Writer:        nil,
+		CommittedIndex: startIndex,
+		EndIndex:       0,
+		File:           nil,
+		Name:           name,
+		Size:           0,
+		StartIndex:     startIndex,
+		Writer:         nil,
 	}
 
 	if err := segment.open(); err != nil {
@@ -62,8 +62,8 @@ func NewSegment(name string) (*Segment, error) {
 				break
 			}
 
-			segment.IndexCommited = entry.Header.Index
-			segment.IndexEnd = entry.Header.Index
+			segment.CommittedIndex = entry.Header.Index
+			segment.EndIndex = entry.Header.Index
 
 			offset = offset + EntryHeaderSize + entry.Header.Length
 		}
@@ -92,8 +92,8 @@ func (s *Segment) Close() error {
 		s.File = nil
 	}
 
-	s.IndexCommited = s.IndexStart
-	s.IndexEnd = 0
+	s.CommittedIndex = s.StartIndex
+	s.EndIndex = 0
 	s.Size = 0
 
 	return nil
@@ -102,7 +102,7 @@ func (s *Segment) Close() error {
 func (s *Segment) Commit() error {
 	s.mu.Lock()
 
-	indexCommitted := s.IndexEnd
+	committedIndex := s.EndIndex
 
 	if err := s.open(); err != nil {
 		s.mu.Unlock()
@@ -125,8 +125,8 @@ func (s *Segment) Commit() error {
 	}
 
 	s.mu.Lock()
-	if indexCommitted > s.IndexCommited {
-		s.IndexCommited = indexCommitted
+	if committedIndex > s.CommittedIndex {
+		s.CommittedIndex = committedIndex
 	}
 	s.mu.Unlock()
 
@@ -185,8 +185,8 @@ func (s *Segment) Truncate(idx uint64) error {
 		return err
 	}
 
-	if idx < s.IndexStart || idx > s.IndexEnd {
-		return fmt.Errorf("truncate idx %d out of segment range [%d,%d]", idx, s.IndexStart, s.IndexEnd)
+	if idx < s.StartIndex || idx > s.EndIndex {
+		return fmt.Errorf("truncate idx %d out of segment range [%d,%d]", idx, s.StartIndex, s.EndIndex)
 	}
 
 	var offset uint64 = 0
@@ -214,9 +214,9 @@ func (s *Segment) Truncate(idx uint64) error {
 			s.Size = offset
 
 			if entryHeader.Index > 0 {
-				s.IndexEnd = entryHeader.Index - 1
+				s.EndIndex = entryHeader.Index - 1
 			} else {
-				s.IndexEnd = 0
+				s.EndIndex = 0
 			}
 
 			s.Writer.Reset(s.File)
@@ -240,10 +240,10 @@ func (s *Segment) Write(data []byte) (*Entry, error) {
 
 	index := uint64(0)
 
-	if s.IndexEnd == 0 {
-		index = s.IndexStart
+	if s.EndIndex == 0 {
+		index = s.StartIndex
 	} else {
-		index = s.IndexEnd + 1
+		index = s.EndIndex + 1
 	}
 
 	entry, err := NewEntry(data, index)
@@ -262,7 +262,7 @@ func (s *Segment) Write(data []byte) (*Entry, error) {
 		return nil, err
 	}
 
-	s.IndexEnd = entry.Header.Index
+	s.EndIndex = entry.Header.Index
 	s.Size += uint64(len(b))
 
 	return entry, nil
