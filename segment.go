@@ -36,7 +36,7 @@ func NewSegment(name string) (*Segment, error) {
 
 	segment := &Segment{
 		File:          nil,
-		IndexCommited: 0,
+		IndexCommited: indexStart,
 		IndexEnd:      0,
 		IndexStart:    indexStart,
 		Name:          name,
@@ -92,7 +92,7 @@ func (s *Segment) Close() error {
 		s.File = nil
 	}
 
-	s.IndexCommited = 0
+	s.IndexCommited = s.IndexStart
 	s.IndexEnd = 0
 	s.Size = 0
 

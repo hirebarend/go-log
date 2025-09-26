@@ -1,33 +1,39 @@
 package main
 
 import (
+	"fmt"
+
 	golog "github.com/hirebarend/go-log"
 )
 
 func main() {
-	log := golog.NewLog("data")
+	log := golog.NewLog("data", 64<<20)
 
 	log.Load()
 
-	// for i := 0; i < 5_000_000; i++ {
-	// 	_, err := log.Write([]byte("Here is a string...."))
+	for i := 0; i < 10_000_000; i++ {
+		_, err := log.Write([]byte("Lorem ipsum dolor sit amet, consectetur adipiscing elit."))
 
-	// 	if err != nil {
-	// 		panic(err)
-	// 	}
-	// }
+		if err != nil {
+			panic(err)
+		}
+	}
 
-	// log.Commit()
+	committedIndex, err := log.GetCommittedIndex()
 
-	// segment := log.Segments[4]
+	if err != nil {
+		panic(err)
+	}
 
-	// fmt.Printf("%d -> %d\n", segment.IndexStart, segment.IndexEnd)
+	fmt.Printf("IndexCommited: %d\n", committedIndex)
 
-	// index, _ := log.Write([]byte("Here is a string...."))
+	log.Commit()
 
-	// log.Commit()
+	committedIndex, err = log.GetCommittedIndex()
 
-	// fmt.Printf("%d\n", index)
+	if err != nil {
+		panic(err)
+	}
 
-	log.TruncateTo(2500101)
+	fmt.Printf("IndexCommited: %d\n", committedIndex)
 }

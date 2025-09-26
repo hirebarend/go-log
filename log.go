@@ -10,15 +10,17 @@ import (
 )
 
 type Log struct {
-	Dir      string
-	mu       sync.RWMutex
-	Segments []*Segment
+	Dir            string
+	mu             sync.RWMutex
+	MaxSegmentSzie uint64
+	Segments       []*Segment
 }
 
-func NewLog(dir string) *Log {
+func NewLog(dir string, maxSegmentSize uint64) *Log {
 	return &Log{
-		Dir:      dir,
-		Segments: []*Segment{},
+		Dir:            dir,
+		MaxSegmentSzie: maxSegmentSize,
+		Segments:       []*Segment{},
 	}
 }
 
@@ -36,6 +38,22 @@ func (l *Log) Commit() error {
 	l.mu.RUnlock()
 
 	return segment.Commit()
+}
+
+func (l *Log) GetCommittedIndex() (uint64, error) {
+	l.mu.RLock()
+
+	if len(l.Segments) == 0 {
+		l.mu.RUnlock()
+
+		return 0, fmt.Errorf("no segment")
+	}
+
+	segment := l.Segments[len(l.Segments)-1]
+
+	l.mu.RUnlock()
+
+	return segment.IndexCommited, nil
 }
 
 func (l *Log) Load() error {
@@ -235,7 +253,7 @@ func (l *Log) Write(data []byte) (uint64, error) {
 
 	size := uint64(4 + 4 + 8 + len(data))
 
-	if segment.Size+size > 75*1_000_000 {
+	if segment.Size+size > l.MaxSegmentSzie {
 		if err := segment.Commit(); err != nil {
 			return 0, err
 		}
