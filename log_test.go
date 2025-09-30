@@ -8,7 +8,7 @@ import (
 )
 
 func BenchmarkWrite(b *testing.B) {
-	log := NewLog("data", 64<<20)
+	log := NewLog[any]("data", 64<<20)
 
 	log.Load()
 

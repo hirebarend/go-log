@@ -59,7 +59,7 @@ func NewSegment(name string) (*Segment, error) {
 			}
 
 			if err != nil {
-				break
+				return segment, err
 			}
 
 			segment.CommittedIndex = entry.Header.Index

@@ -1,30 +1,33 @@
 package golog
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 )
 
-type Log struct {
+type Log[T any] struct {
 	Dir            string
 	mu             sync.RWMutex
 	MaxSegmentSzie uint64
 	Segments       []*Segment
 }
 
-func NewLog(dir string, maxSegmentSize uint64) *Log {
-	return &Log{
+func NewLog[T any](dir string, maxSegmentSize uint64) *Log[T] {
+	return &Log[T]{
 		Dir:            dir,
 		MaxSegmentSzie: maxSegmentSize,
 		Segments:       []*Segment{},
 	}
 }
 
-func (l *Log) Close() error {
+func (l *Log[T]) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -41,13 +44,13 @@ func (l *Log) Close() error {
 	return nil
 }
 
-func (l *Log) Commit() error {
+func (l *Log[T]) Commit() error {
 	l.mu.RLock()
 
 	if len(l.Segments) == 0 {
 		l.mu.RUnlock()
 
-		return fmt.Errorf("no segment")
+		return nil
 	}
 
 	segment := l.Segments[len(l.Segments)-1]
@@ -57,13 +60,13 @@ func (l *Log) Commit() error {
 	return segment.Commit()
 }
 
-func (l *Log) GetCommittedIndex() (uint64, error) {
+func (l *Log[T]) GetCommittedIndex() (uint64, error) {
 	l.mu.RLock()
 
 	if len(l.Segments) == 0 {
 		l.mu.RUnlock()
 
-		return 0, fmt.Errorf("no segment")
+		return 0, nil
 	}
 
 	segment := l.Segments[len(l.Segments)-1]
@@ -73,13 +76,13 @@ func (l *Log) GetCommittedIndex() (uint64, error) {
 	return segment.CommittedIndex, nil
 }
 
-func (l *Log) GetLastIndex() (uint64, error) {
+func (l *Log[T]) GetLastIndex() (uint64, error) {
 	l.mu.RLock()
 
 	if len(l.Segments) == 0 {
 		l.mu.RUnlock()
 
-		return 0, fmt.Errorf("no segment")
+		return 0, nil
 	}
 
 	segment := l.Segments[len(l.Segments)-1]
@@ -89,7 +92,7 @@ func (l *Log) GetLastIndex() (uint64, error) {
 	return segment.EndIndex, nil
 }
 
-func (l *Log) Load() error {
+func (l *Log[T]) Load() error {
 	dirEntries, err := os.ReadDir(l.Dir)
 
 	if err != nil {
@@ -99,6 +102,10 @@ func (l *Log) Load() error {
 	var segments []*Segment
 
 	for _, dirEntry := range dirEntries {
+		if !strings.HasSuffix(dirEntry.Name(), ".seg") {
+			continue
+		}
+
 		segment, err := NewSegment(filepath.Join(l.Dir, dirEntry.Name()))
 
 		if err != nil {
@@ -119,7 +126,7 @@ func (l *Log) Load() error {
 	return err
 }
 
-func (l *Log) Read(index uint64) ([]byte, error) {
+func (l *Log[T]) Read(index uint64) ([]byte, error) {
 	l.mu.RLock()
 
 	if len(l.Segments) == 0 {
@@ -147,7 +154,49 @@ func (l *Log) Read(index uint64) ([]byte, error) {
 	return segment.Read(index)
 }
 
-func (l *Log) TruncateFrom(index uint64) error {
+func (l *Log[T]) ReadAndDeserialize(index uint64) (*T, error) {
+	data, err := l.Read(index)
+
+	if err != nil {
+		return nil, err
+	}
+
+	var result T
+
+	buf := bytes.NewBuffer(data)
+
+	dec := gob.NewDecoder(buf)
+
+	err = dec.Decode(&result)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &result, err
+}
+
+func (l *Log[T]) SerializeAndWrite(obj *T) (uint64, error) {
+	var data bytes.Buffer
+
+	encoder := gob.NewEncoder(&data)
+
+	err := encoder.Encode(obj)
+
+	if err != nil {
+		return 0, err
+	}
+
+	index, err := l.Write(data.Bytes())
+
+	if err != nil {
+		return 0, err
+	}
+
+	return index, nil
+}
+
+func (l *Log[T]) TruncateFrom(index uint64) error {
 	l.mu.Lock()
 
 	if len(l.Segments) == 0 {
@@ -199,7 +248,7 @@ func (l *Log) TruncateFrom(index uint64) error {
 	return nil
 }
 
-func (l *Log) TruncateTo(index uint64) error {
+func (l *Log[T]) TruncateTo(index uint64) error {
 	l.mu.Lock()
 
 	if len(l.Segments) == 0 {
@@ -300,7 +349,7 @@ func (l *Log) TruncateTo(index uint64) error {
 	return nil
 }
 
-func (l *Log) Write(data []byte) (uint64, error) {
+func (l *Log[T]) Write(data []byte) (uint64, error) {
 	l.mu.Lock()
 
 	if len(l.Segments) == 0 {
