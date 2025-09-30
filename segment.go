@@ -52,7 +52,7 @@ func NewSegment(name string) (*Segment, error) {
 		var offset uint64 = 0
 
 		for {
-			entry, err := segment.readEntry(offset)
+			entry, err := segment.readEntryAtOffset(offset)
 
 			if err == io.EOF {
 				break
@@ -85,6 +85,10 @@ func (s *Segment) Close() error {
 	s.Writer = nil
 
 	if s.File != nil {
+		if err := s.File.Sync(); err != nil {
+			return err
+		}
+
 		if err := s.File.Close(); err != nil {
 			return err
 		}
@@ -173,7 +177,55 @@ func (s *Segment) Open() error {
 	return nil
 }
 
-func (s *Segment) Truncate(idx uint64) error {
+func (s *Segment) Read(index uint64) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.open(); err != nil {
+		return nil, err
+	}
+
+	if s.Writer != nil {
+		if err := s.Writer.Flush(); err != nil {
+			return nil, err
+		}
+	}
+
+	if index < s.StartIndex || index > s.EndIndex {
+		return nil, fmt.Errorf("read index %d out of segment range [%d,%d]", index, s.StartIndex, s.EndIndex)
+	}
+
+	var offset uint64 = 0
+
+	for {
+		entryHeader, err := s.readEntryHeaderAtOffset(offset)
+
+		if err == io.EOF {
+			return nil, fmt.Errorf("index %d not found in segment", index)
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		switch {
+		case entryHeader.Index == index:
+			entry, err := s.readEntryAtOffset(offset)
+
+			if err != nil {
+				return nil, err
+			}
+
+			return entry.Data, nil
+		case entryHeader.Index > index:
+			return nil, fmt.Errorf("index %d not found in segment", index)
+		default:
+			offset = offset + EntryHeaderSize + entryHeader.Length
+		}
+	}
+}
+
+func (s *Segment) Truncate(index uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -185,14 +237,14 @@ func (s *Segment) Truncate(idx uint64) error {
 		return err
 	}
 
-	if idx < s.StartIndex || idx > s.EndIndex {
-		return fmt.Errorf("truncate idx %d out of segment range [%d,%d]", idx, s.StartIndex, s.EndIndex)
+	if index < s.StartIndex || index > s.EndIndex {
+		return fmt.Errorf("truncate index %d out of segment range [%d,%d]", index, s.StartIndex, s.EndIndex)
 	}
 
 	var offset uint64 = 0
 
 	for {
-		entryHeader, err := s.readEntryHeader(offset)
+		entryHeader, err := s.readEntryHeaderAtOffset(offset)
 
 		if err == io.EOF {
 			break
@@ -202,7 +254,7 @@ func (s *Segment) Truncate(idx uint64) error {
 			return err
 		}
 
-		if entryHeader.Index > idx {
+		if entryHeader.Index >= index {
 			if err := s.File.Truncate(int64(offset)); err != nil {
 				return err
 			}
@@ -213,10 +265,18 @@ func (s *Segment) Truncate(idx uint64) error {
 
 			s.Size = offset
 
-			if entryHeader.Index > 0 {
-				s.EndIndex = entryHeader.Index - 1
-			} else {
+			if offset == 0 {
+				s.StartIndex = 0
 				s.EndIndex = 0
+				s.CommittedIndex = 0
+			} else {
+				if entryHeader.Index > 0 {
+					s.CommittedIndex = entryHeader.Index - 1
+					s.EndIndex = entryHeader.Index - 1
+				} else {
+					s.CommittedIndex = 0
+					s.EndIndex = 0
+				}
 			}
 
 			s.Writer.Reset(s.File)
@@ -230,12 +290,12 @@ func (s *Segment) Truncate(idx uint64) error {
 	return nil
 }
 
-func (s *Segment) Write(data []byte) (*Entry, error) {
+func (s *Segment) Write(data []byte) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if err := s.open(); err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	index := uint64(0)
@@ -249,23 +309,23 @@ func (s *Segment) Write(data []byte) (*Entry, error) {
 	entry, err := NewEntry(data, index)
 
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	b, err := entry.ToBytes()
 
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	if _, err := s.Writer.Write(b); err != nil {
-		return nil, err
+		return 0, err
 	}
 
 	s.EndIndex = entry.Header.Index
 	s.Size += uint64(len(b))
 
-	return entry, nil
+	return entry.Header.Index, nil
 }
 
 func (s *Segment) open() error {
@@ -297,8 +357,8 @@ func (s *Segment) open() error {
 	return nil
 }
 
-func (s *Segment) readEntry(offset uint64) (*Entry, error) {
-	entryHeader, err := s.readEntryHeader(offset)
+func (s *Segment) readEntryAtOffset(offset uint64) (*Entry, error) {
+	entryHeader, err := s.readEntryHeaderAtOffset(offset)
 
 	if err != nil {
 		return nil, err
@@ -329,7 +389,7 @@ func (s *Segment) readEntry(offset uint64) (*Entry, error) {
 	}, nil
 }
 
-func (s *Segment) readEntryHeader(offset uint64) (*EntryHeader, error) {
+func (s *Segment) readEntryHeaderAtOffset(offset uint64) (*EntryHeader, error) {
 	if offset >= s.Size {
 		return nil, io.EOF
 	}
