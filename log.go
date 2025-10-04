@@ -196,22 +196,6 @@ func (l *Log[T]) SerializeAndWrite(obj *T) (uint64, error) {
 	return index, nil
 }
 
-func (l *Log[T]) SerializeAndWriteMany(arr []*T) (uint64, error) {
-	index := uint64(0)
-
-	for _, x := range arr {
-		i, err := l.SerializeAndWrite(x)
-
-		if err != nil {
-			return index, err
-		}
-
-		index = i
-	}
-
-	return index, nil
-}
-
 func (l *Log[T]) TruncateFrom(index uint64) error {
 	l.mu.Lock()
 
@@ -398,9 +382,9 @@ func (l *Log[T]) Write(data []byte) (uint64, error) {
 		segment = l.Segments[len(l.Segments)-1]
 	}
 
-	index, err := segment.Write(data)
-
 	l.mu.Unlock()
+
+	index, err := segment.Write(data)
 
 	if err != nil {
 		return 0, err

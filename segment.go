@@ -16,7 +16,7 @@ type Segment struct {
 	File           *os.File
 	CommittedIndex uint64
 	EndIndex       uint64
-	mu             sync.Mutex
+	mu             sync.RWMutex
 	Name           string
 	Size           uint64
 	StartIndex     uint64
@@ -178,8 +178,8 @@ func (s *Segment) Open() error {
 }
 
 func (s *Segment) Read(index uint64) ([]byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	if err := s.open(); err != nil {
 		return nil, err
