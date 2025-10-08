@@ -356,6 +356,8 @@ func (l *Log[T]) Write(data []byte) (uint64, error) {
 		segment, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", 1)))
 
 		if err != nil {
+			l.mu.Unlock()
+
 			return 0, err
 		}
 
@@ -368,12 +370,16 @@ func (l *Log[T]) Write(data []byte) (uint64, error) {
 
 	if segment.Size+size > l.MaxSegmentSzie {
 		if err := segment.Commit(); err != nil {
+			l.mu.Unlock()
+
 			return 0, err
 		}
 
 		newSegment, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", segment.EndIndex+1)))
 
 		if err != nil {
+			l.mu.Unlock()
+
 			return 0, err
 		}
 
@@ -391,4 +397,8 @@ func (l *Log[T]) Write(data []byte) (uint64, error) {
 	}
 
 	return index, nil
+}
+
+func (l *Log[T]) WriteAndCommit(data []byte) (uint64, error) {
+	return 0, nil
 }
