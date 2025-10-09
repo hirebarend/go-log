@@ -10,24 +10,55 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
+
+type Waiter struct {
+	done chan error
+}
 
 type Log[T any] struct {
 	Dir            string
 	mu             sync.RWMutex
-	MaxSegmentSzie uint64
+	MaxSegmentSize uint64
 	Segments       []*Segment
+
+	stopCh    chan struct{}
+	stopped   chan struct{}
+	waiters   []Waiter
+	waitersMu sync.Mutex
 }
 
 func NewLog[T any](dir string, maxSegmentSize uint64) *Log[T] {
-	return &Log[T]{
+	log := &Log[T]{
 		Dir:            dir,
-		MaxSegmentSzie: maxSegmentSize,
+		MaxSegmentSize: maxSegmentSize,
 		Segments:       []*Segment{},
+
+		stopCh:  make(chan struct{}),
+		stopped: make(chan struct{}),
+		waiters: []Waiter{},
 	}
+
+	go log.flusher()
+
+	return log
 }
 
 func (l *Log[T]) Close() error {
+	l.waitersMu.Lock()
+
+	if len(l.waiters) > 0 {
+		err := l.Commit()
+
+		l.respondToWaiters(err)
+	}
+
+	l.waitersMu.Unlock()
+
+	close(l.stopCh)
+	<-l.stopped
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -154,7 +185,7 @@ func (l *Log[T]) Read(index uint64) ([]byte, error) {
 	return segment.Read(index)
 }
 
-func (l *Log[T]) ReadAndDeserialize(index uint64) (*T, error) {
+func (l *Log[T]) ReadDeserialize(index uint64) (*T, error) {
 	data, err := l.Read(index)
 
 	if err != nil {
@@ -176,7 +207,7 @@ func (l *Log[T]) ReadAndDeserialize(index uint64) (*T, error) {
 	return &result, err
 }
 
-func (l *Log[T]) SerializeAndWrite(obj *T) (uint64, error) {
+func (l *Log[T]) SerializeWrite(obj *T) (uint64, error) {
 	var data bytes.Buffer
 
 	encoder := gob.NewEncoder(&data)
@@ -187,13 +218,7 @@ func (l *Log[T]) SerializeAndWrite(obj *T) (uint64, error) {
 		return 0, err
 	}
 
-	index, err := l.Write(data.Bytes())
-
-	if err != nil {
-		return 0, err
-	}
-
-	return index, nil
+	return l.Write(data.Bytes())
 }
 
 func (l *Log[T]) TruncateFrom(index uint64) error {
@@ -368,8 +393,16 @@ func (l *Log[T]) Write(data []byte) (uint64, error) {
 
 	size := uint64(EntryHeaderSize + len(data))
 
-	if segment.Size+size > l.MaxSegmentSzie {
-		if err := segment.Commit(); err != nil {
+	if segment.Size+size > l.MaxSegmentSize {
+		l.waitersMu.Lock()
+
+		err := segment.Commit()
+
+		l.respondToWaiters(err)
+
+		l.waitersMu.Unlock()
+
+		if err != nil {
 			l.mu.Unlock()
 
 			return 0, err
@@ -390,15 +423,85 @@ func (l *Log[T]) Write(data []byte) (uint64, error) {
 
 	l.mu.Unlock()
 
-	index, err := segment.Write(data)
+	return segment.Write(data)
+}
+
+func (l *Log[T]) WriteCommit(data []byte) (uint64, error) {
+	index, err := l.Write(data)
 
 	if err != nil {
+		return 0, err
+	}
+
+	waiter := Waiter{done: make(chan error, 1)}
+
+	l.waitersMu.Lock()
+	l.waiters = append(l.waiters, waiter)
+	l.waitersMu.Unlock()
+
+	if err := <-waiter.done; err != nil {
 		return 0, err
 	}
 
 	return index, nil
 }
 
-func (l *Log[T]) WriteAndCommit(data []byte) (uint64, error) {
-	return 0, nil
+func (l *Log[T]) SerializeWriteCommit(obj *T) (uint64, error) {
+	var data bytes.Buffer
+
+	encoder := gob.NewEncoder(&data)
+
+	err := encoder.Encode(obj)
+
+	if err != nil {
+		return 0, err
+	}
+
+	return l.WriteCommit(data.Bytes())
+}
+
+func (l *Log[T]) flusher() {
+	t := time.NewTicker(5 * time.Millisecond)
+	defer t.Stop()
+
+	defer close(l.stopped)
+
+	for {
+		select {
+		case <-l.stopCh:
+			l.waitersMu.Lock()
+
+			if len(l.waiters) > 0 {
+				err := l.Commit()
+
+				l.respondToWaiters(err)
+			}
+
+			l.waitersMu.Unlock()
+
+			return
+		case <-t.C:
+			l.waitersMu.Lock()
+
+			if len(l.waiters) == 0 {
+				l.waitersMu.Unlock()
+
+				continue
+			}
+
+			err := l.Commit()
+
+			l.respondToWaiters(err)
+
+			l.waitersMu.Unlock()
+		}
+	}
+}
+
+func (l *Log[T]) respondToWaiters(err error) {
+	for _, w := range l.waiters {
+		w.done <- err
+	}
+
+	l.waiters = []Waiter{}
 }
