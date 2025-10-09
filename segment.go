@@ -14,6 +14,7 @@ import (
 
 type Segment struct {
 	File           *os.File
+	Cache          []uint64
 	CommittedIndex uint64
 	EndIndex       uint64
 	mu             sync.RWMutex
@@ -23,7 +24,7 @@ type Segment struct {
 	Writer         *bufio.Writer
 }
 
-func NewSegment(name string) (*Segment, error) {
+func NewSegment(name string, open bool) (*Segment, error) {
 	base := filepath.Base(name)
 
 	startIndexStr := strings.TrimSuffix(base, filepath.Ext(base))
@@ -35,6 +36,7 @@ func NewSegment(name string) (*Segment, error) {
 	}
 
 	segment := &Segment{
+		Cache:          nil,
 		CommittedIndex: startIndex,
 		EndIndex:       0,
 		File:           nil,
@@ -48,24 +50,9 @@ func NewSegment(name string) (*Segment, error) {
 		return nil, err
 	}
 
-	if segment.Size != 0 {
-		var offset uint64 = 0
-
-		for {
-			entry, err := segment.readEntryAtOffset(offset)
-
-			if err == io.EOF {
-				break
-			}
-
-			if err != nil {
-				return segment, err
-			}
-
-			segment.CommittedIndex = entry.Header.Index
-			segment.EndIndex = entry.Header.Index
-
-			offset = offset + EntryHeaderSize + entry.Header.Length
+	if !open {
+		if err := segment.Close(); err != nil {
+			return nil, err
 		}
 	}
 
@@ -95,10 +82,6 @@ func (s *Segment) Close() error {
 
 		s.File = nil
 	}
-
-	s.CommittedIndex = s.StartIndex
-	s.EndIndex = 0
-	s.Size = 0
 
 	return nil
 }
@@ -150,6 +133,10 @@ func (s *Segment) Delete() error {
 	s.Writer = nil
 
 	if s.File != nil {
+		if err := s.File.Sync(); err != nil {
+			return err
+		}
+
 		if err := s.File.Close(); err != nil {
 			return err
 		}
@@ -160,8 +147,6 @@ func (s *Segment) Delete() error {
 	if err := os.Remove(s.Name); err != nil {
 		return err
 	}
-
-	s.Size = 0
 
 	return nil
 }
@@ -193,6 +178,24 @@ func (s *Segment) Read(index uint64) ([]byte, error) {
 
 	if index < s.StartIndex || index > s.EndIndex {
 		return nil, fmt.Errorf("read index %d out of segment range [%d,%d]", index, s.StartIndex, s.EndIndex)
+	}
+
+	if s.Cache != nil {
+		i := int(index - s.StartIndex)
+
+		if i < 0 || i >= len(s.Cache) {
+			return nil, fmt.Errorf("index %d not found in segment", index)
+		}
+
+		offset := s.Cache[i]
+
+		entry, err := s.readEntryAtOffset(offset)
+
+		if err != nil {
+			return nil, err
+		}
+
+		return entry.Data, nil
 	}
 
 	var offset uint64 = 0
@@ -266,16 +269,36 @@ func (s *Segment) Truncate(index uint64) error {
 			s.Size = offset
 
 			if offset == 0 {
-				s.StartIndex = 0
 				s.EndIndex = 0
 				s.CommittedIndex = 0
+
+				if s.Cache != nil {
+					s.Cache = []uint64{}
+				}
 			} else {
 				if entryHeader.Index > 0 {
 					s.CommittedIndex = entryHeader.Index - 1
 					s.EndIndex = entryHeader.Index - 1
+
+					if s.Cache != nil {
+						newLen := int(s.EndIndex - s.StartIndex + 1)
+						if newLen < 0 {
+							newLen = 0
+						}
+
+						if newLen > len(s.Cache) {
+							newLen = len(s.Cache)
+						}
+
+						s.Cache = s.Cache[:newLen]
+					}
 				} else {
 					s.CommittedIndex = 0
 					s.EndIndex = 0
+
+					if s.Cache != nil {
+						s.Cache = []uint64{}
+					}
 				}
 			}
 
@@ -322,10 +345,21 @@ func (s *Segment) Write(data []byte) (uint64, error) {
 		return 0, err
 	}
 
+	if s.Cache != nil {
+		s.Cache = append(s.Cache, s.Size)
+	}
+
 	s.EndIndex = entry.Header.Index
 	s.Size += uint64(len(b))
 
 	return entry.Header.Index, nil
+}
+
+func (s *Segment) UnloadCache() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.Cache = nil
 }
 
 func (s *Segment) open() error {
@@ -348,6 +382,31 @@ func (s *Segment) open() error {
 
 		s.File = file
 		s.Size = uint64(stat.Size())
+
+		if s.Size != 0 {
+			var offset uint64 = 0
+
+			for {
+				header, err := s.readEntryHeaderAtOffset(offset)
+
+				if err == io.EOF {
+					break
+				}
+
+				if err != nil {
+					return err
+				}
+
+				s.CommittedIndex = header.Index
+				s.EndIndex = header.Index
+
+				if s.Cache != nil {
+					s.Cache = append(s.Cache, offset)
+				}
+
+				offset = offset + EntryHeaderSize + header.Length
+			}
+		}
 	}
 
 	if s.Writer == nil {
@@ -369,7 +428,6 @@ func (s *Segment) readEntryAtOffset(offset uint64) (*Entry, error) {
 
 	if err != nil {
 		if err == io.EOF && n == int(entryHeader.Length) {
-			// exactly at end; ok
 		} else {
 			return nil, err
 		}

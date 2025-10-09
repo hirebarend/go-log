@@ -40,7 +40,7 @@ func NewLog[T any](dir string, maxSegmentSize uint64) *Log[T] {
 		waiters: []Waiter{},
 	}
 
-	go log.flusher()
+	go log.flusher(10 * time.Millisecond)
 
 	return log
 }
@@ -137,7 +137,7 @@ func (l *Log[T]) Load() error {
 			continue
 		}
 
-		segment, err := NewSegment(filepath.Join(l.Dir, dirEntry.Name()))
+		segment, err := NewSegment(filepath.Join(l.Dir, dirEntry.Name()), true)
 
 		if err != nil {
 			return err
@@ -152,6 +152,7 @@ func (l *Log[T]) Load() error {
 
 	l.mu.Lock()
 	l.Segments = segments
+	l.closeOldSegments()
 	l.mu.Unlock()
 
 	return err
@@ -267,6 +268,7 @@ func (l *Log[T]) TruncateFrom(index uint64) error {
 	}
 
 	l.Segments = l.Segments[:cut]
+	l.closeOldSegments()
 
 	l.mu.Unlock()
 
@@ -305,6 +307,14 @@ func (l *Log[T]) TruncateTo(index uint64) error {
 		var newSegment *Segment
 
 		for {
+			err := segment.open()
+
+			if err != nil {
+				l.mu.Unlock()
+
+				return err
+			}
+
 			entry, err := segment.readEntryAtOffset(offset)
 
 			if err == io.EOF {
@@ -319,7 +329,7 @@ func (l *Log[T]) TruncateTo(index uint64) error {
 
 			if entry.Header.Index > index {
 				if newSegment == nil {
-					ns, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", entry.Header.Index)))
+					ns, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", entry.Header.Index)), true)
 
 					if err != nil {
 						l.mu.Unlock()
@@ -361,6 +371,7 @@ func (l *Log[T]) TruncateTo(index uint64) error {
 		segments = append(segments, l.Segments[i+1:]...)
 
 		l.Segments = segments
+		l.closeOldSegments()
 
 		l.mu.Unlock()
 
@@ -368,6 +379,7 @@ func (l *Log[T]) TruncateTo(index uint64) error {
 	}
 
 	l.Segments = segments
+	l.closeOldSegments()
 
 	l.mu.Unlock()
 
@@ -378,7 +390,7 @@ func (l *Log[T]) Write(data []byte) (uint64, error) {
 	l.mu.Lock()
 
 	if len(l.Segments) == 0 {
-		segment, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", 1)))
+		segment, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", 1)), true)
 
 		if err != nil {
 			l.mu.Unlock()
@@ -387,6 +399,7 @@ func (l *Log[T]) Write(data []byte) (uint64, error) {
 		}
 
 		l.Segments = append(l.Segments, segment)
+		l.closeOldSegments()
 	}
 
 	segment := l.Segments[len(l.Segments)-1]
@@ -408,7 +421,7 @@ func (l *Log[T]) Write(data []byte) (uint64, error) {
 			return 0, err
 		}
 
-		newSegment, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", segment.EndIndex+1)))
+		newSegment, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", segment.EndIndex+1)), true)
 
 		if err != nil {
 			l.mu.Unlock()
@@ -417,6 +430,7 @@ func (l *Log[T]) Write(data []byte) (uint64, error) {
 		}
 
 		l.Segments = append(l.Segments, newSegment)
+		l.closeOldSegments()
 
 		segment = l.Segments[len(l.Segments)-1]
 	}
@@ -460,8 +474,20 @@ func (l *Log[T]) SerializeWriteCommit(obj *T) (uint64, error) {
 	return l.WriteCommit(data.Bytes())
 }
 
-func (l *Log[T]) flusher() {
-	t := time.NewTicker(5 * time.Millisecond)
+func (l *Log[T]) closeOldSegments() {
+	if len(l.Segments) <= 5 {
+		return
+	}
+
+	keepFrom := len(l.Segments) - 5
+
+	for i := 0; i < keepFrom; i++ {
+		_ = l.Segments[i].Close()
+	}
+}
+
+func (l *Log[T]) flusher(d time.Duration) {
+	t := time.NewTicker(d)
 	defer t.Stop()
 
 	defer close(l.stopped)
