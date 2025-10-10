@@ -137,7 +137,7 @@ func (l *Log[T]) Load() error {
 			continue
 		}
 
-		segment, err := NewSegment(filepath.Join(l.Dir, dirEntry.Name()), true)
+		segment, err := NewSegment(filepath.Join(l.Dir, dirEntry.Name()))
 
 		if err != nil {
 			return err
@@ -329,7 +329,7 @@ func (l *Log[T]) TruncateTo(index uint64) error {
 
 			if entry.Header.Index > index {
 				if newSegment == nil {
-					ns, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", entry.Header.Index)), true)
+					ns, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", entry.Header.Index)))
 
 					if err != nil {
 						l.mu.Unlock()
@@ -390,7 +390,7 @@ func (l *Log[T]) Write(data []byte) (uint64, error) {
 	l.mu.Lock()
 
 	if len(l.Segments) == 0 {
-		segment, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", 1)), true)
+		segment, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", 1)))
 
 		if err != nil {
 			l.mu.Unlock()
@@ -421,7 +421,7 @@ func (l *Log[T]) Write(data []byte) (uint64, error) {
 			return 0, err
 		}
 
-		newSegment, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", segment.EndIndex+1)), true)
+		newSegment, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", segment.EndIndex+1)))
 
 		if err != nil {
 			l.mu.Unlock()

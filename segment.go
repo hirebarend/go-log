@@ -24,7 +24,7 @@ type Segment struct {
 	Writer         *bufio.Writer
 }
 
-func NewSegment(name string, open bool) (*Segment, error) {
+func NewSegment(name string) (*Segment, error) {
 	base := filepath.Base(name)
 
 	startIndexStr := strings.TrimSuffix(base, filepath.Ext(base))
@@ -36,7 +36,7 @@ func NewSegment(name string, open bool) (*Segment, error) {
 	}
 
 	segment := &Segment{
-		Cache:          nil,
+		Cache:          []uint64{},
 		CommittedIndex: startIndex,
 		EndIndex:       0,
 		File:           nil,
@@ -48,12 +48,6 @@ func NewSegment(name string, open bool) (*Segment, error) {
 
 	if err := segment.open(); err != nil {
 		return nil, err
-	}
-
-	if !open {
-		if err := segment.Close(); err != nil {
-			return nil, err
-		}
 	}
 
 	return segment, nil
@@ -82,6 +76,8 @@ func (s *Segment) Close() error {
 
 		s.File = nil
 	}
+
+	s.Cache = nil
 
 	return nil
 }
@@ -353,13 +349,6 @@ func (s *Segment) Write(data []byte) (uint64, error) {
 	s.Size += uint64(len(b))
 
 	return entry.Header.Index, nil
-}
-
-func (s *Segment) UnloadCache() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.Cache = nil
 }
 
 func (s *Segment) open() error {
