@@ -353,6 +353,12 @@ func (s *Segment) Write(data []byte) (uint64, error) {
 
 func (s *Segment) open() error {
 	if s.File == nil {
+		directory := filepath.Dir(s.Name)
+
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", directory, err)
+		}
+
 		file, err := os.OpenFile(s.Name, os.O_CREATE|os.O_RDWR, 0o644)
 
 		if err != nil {
