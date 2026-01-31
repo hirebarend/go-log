@@ -10,7 +10,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
+
+const segmentBufferSize = 64 * 1024
 
 type Segment struct {
 	File           *os.File
@@ -19,7 +22,7 @@ type Segment struct {
 	EndIndex       uint64
 	mu             sync.RWMutex
 	Name           string
-	Size           uint64
+	size           atomic.Uint64
 	StartIndex     uint64
 	Writer         *bufio.Writer
 }
@@ -41,7 +44,6 @@ func NewSegment(name string) (*Segment, error) {
 		EndIndex:       0,
 		File:           nil,
 		Name:           name,
-		Size:           0,
 		StartIndex:     startIndex,
 		Writer:         nil,
 	}
@@ -84,34 +86,29 @@ func (s *Segment) Close() error {
 
 func (s *Segment) Commit() error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	committedIndex := s.EndIndex
 
 	if err := s.open(); err != nil {
-		s.mu.Unlock()
-
 		return err
 	}
 
 	if s.Writer != nil {
 		if err := s.Writer.Flush(); err != nil {
-			s.mu.Unlock()
-
 			return err
 		}
 	}
 
-	s.mu.Unlock()
-
-	if err := s.File.Sync(); err != nil {
-		return err
+	if s.File != nil {
+		if err := s.File.Sync(); err != nil {
+			return err
+		}
 	}
 
-	s.mu.Lock()
 	if committedIndex > s.CommittedIndex {
 		s.CommittedIndex = committedIndex
 	}
-	s.mu.Unlock()
 
 	return nil
 }
@@ -159,8 +156,8 @@ func (s *Segment) Open() error {
 }
 
 func (s *Segment) Read(index uint64) ([]byte, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if err := s.open(); err != nil {
 		return nil, err
@@ -262,7 +259,7 @@ func (s *Segment) Truncate(index uint64) error {
 				return err
 			}
 
-			s.Size = offset
+			s.size.Store(offset)
 
 			if offset == 0 {
 				s.EndIndex = 0
@@ -342,11 +339,11 @@ func (s *Segment) Write(data []byte) (uint64, error) {
 	}
 
 	if s.Cache != nil {
-		s.Cache = append(s.Cache, s.Size)
+		s.Cache = append(s.Cache, s.size.Load())
 	}
 
 	s.EndIndex = entry.Header.Index
-	s.Size += uint64(len(b))
+	s.size.Add(uint64(len(b)))
 
 	return entry.Header.Index, nil
 }
@@ -366,19 +363,23 @@ func (s *Segment) open() error {
 		}
 
 		if _, err := file.Seek(0, io.SeekEnd); err != nil {
+			file.Close()
+
 			return err
 		}
 
 		stat, err := file.Stat()
 
 		if err != nil {
+			file.Close()
+
 			return err
 		}
 
 		s.File = file
-		s.Size = uint64(stat.Size())
+		s.size.Store(uint64(stat.Size()))
 
-		if s.Size != 0 {
+		if s.size.Load() != 0 {
 			var offset uint64 = 0
 
 			for {
@@ -405,7 +406,7 @@ func (s *Segment) open() error {
 	}
 
 	if s.Writer == nil {
-		s.Writer = bufio.NewWriter(s.File)
+		s.Writer = bufio.NewWriterSize(s.File, segmentBufferSize)
 	}
 
 	return nil
@@ -443,7 +444,7 @@ func (s *Segment) readEntryAtOffset(offset uint64) (*Entry, error) {
 }
 
 func (s *Segment) readEntryHeaderAtOffset(offset uint64) (*EntryHeader, error) {
-	if offset >= s.Size {
+	if offset >= s.size.Load() {
 		return nil, io.EOF
 	}
 

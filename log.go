@@ -13,6 +13,12 @@ import (
 	"time"
 )
 
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return new(bytes.Buffer)
+	},
+}
+
 type Waiter struct {
 	done chan error
 }
@@ -93,34 +99,34 @@ func (l *Log[T]) Commit() error {
 
 func (l *Log[T]) GetCommittedIndex() (uint64, error) {
 	l.mu.RLock()
+	defer l.mu.RUnlock()
 
 	if len(l.Segments) == 0 {
-		l.mu.RUnlock()
-
 		return 0, nil
 	}
 
 	segment := l.Segments[len(l.Segments)-1]
+	segment.mu.RLock()
+	committedIndex := segment.CommittedIndex
+	segment.mu.RUnlock()
 
-	l.mu.RUnlock()
-
-	return segment.CommittedIndex, nil
+	return committedIndex, nil
 }
 
 func (l *Log[T]) GetLastIndex() (uint64, error) {
 	l.mu.RLock()
+	defer l.mu.RUnlock()
 
 	if len(l.Segments) == 0 {
-		l.mu.RUnlock()
-
 		return 0, nil
 	}
 
 	segment := l.Segments[len(l.Segments)-1]
+	segment.mu.RLock()
+	endIndex := segment.EndIndex
+	segment.mu.RUnlock()
 
-	l.mu.RUnlock()
-
-	return segment.EndIndex, nil
+	return endIndex, nil
 }
 
 func (l *Log[T]) Load() error {
@@ -209,17 +215,17 @@ func (l *Log[T]) ReadDeserialize(index uint64) (*T, error) {
 }
 
 func (l *Log[T]) SerializeWrite(obj *T) (uint64, error) {
-	var data bytes.Buffer
+	buf := bufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufferPool.Put(buf)
 
-	encoder := gob.NewEncoder(&data)
+	encoder := gob.NewEncoder(buf)
 
-	err := encoder.Encode(obj)
-
-	if err != nil {
+	if err := encoder.Encode(obj); err != nil {
 		return 0, err
 	}
 
-	return l.Write(data.Bytes())
+	return l.Write(buf.Bytes())
 }
 
 func (l *Log[T]) TruncateFrom(index uint64) error {
@@ -406,7 +412,9 @@ func (l *Log[T]) Write(data []byte) (uint64, error) {
 
 	size := uint64(EntryHeaderSize + len(data))
 
-	if segment.Size+size > l.MaxSegmentSize {
+	if segment.size.Load()+size > l.MaxSegmentSize {
+		l.mu.Unlock()
+
 		l.waitersMu.Lock()
 
 		err := segment.Commit()
@@ -416,23 +424,27 @@ func (l *Log[T]) Write(data []byte) (uint64, error) {
 		l.waitersMu.Unlock()
 
 		if err != nil {
-			l.mu.Unlock()
-
 			return 0, err
 		}
 
-		newSegment, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", segment.EndIndex+1)))
-
-		if err != nil {
-			l.mu.Unlock()
-
-			return 0, err
-		}
-
-		l.Segments = append(l.Segments, newSegment)
-		l.closeOldSegments()
+		l.mu.Lock()
 
 		segment = l.Segments[len(l.Segments)-1]
+
+		if segment.size.Load()+size > l.MaxSegmentSize {
+			newSegment, err := NewSegment(filepath.Join(l.Dir, fmt.Sprintf("%020d.seg", segment.EndIndex+1)))
+
+			if err != nil {
+				l.mu.Unlock()
+
+				return 0, err
+			}
+
+			l.Segments = append(l.Segments, newSegment)
+			l.closeOldSegments()
+
+			segment = l.Segments[len(l.Segments)-1]
+		}
 	}
 
 	l.mu.Unlock()
@@ -450,6 +462,14 @@ func (l *Log[T]) WriteCommit(data []byte) (uint64, error) {
 	waiter := Waiter{done: make(chan error, 1)}
 
 	l.waitersMu.Lock()
+
+	select {
+	case <-l.stopCh:
+		l.waitersMu.Unlock()
+		return 0, fmt.Errorf("log is closed")
+	default:
+	}
+
 	l.waiters = append(l.waiters, waiter)
 	l.waitersMu.Unlock()
 
@@ -461,17 +481,17 @@ func (l *Log[T]) WriteCommit(data []byte) (uint64, error) {
 }
 
 func (l *Log[T]) SerializeWriteCommit(obj *T) (uint64, error) {
-	var data bytes.Buffer
+	buf := bufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufferPool.Put(buf)
 
-	encoder := gob.NewEncoder(&data)
+	encoder := gob.NewEncoder(buf)
 
-	err := encoder.Encode(obj)
-
-	if err != nil {
+	if err := encoder.Encode(obj); err != nil {
 		return 0, err
 	}
 
-	return l.WriteCommit(data.Bytes())
+	return l.WriteCommit(buf.Bytes())
 }
 
 func (l *Log[T]) closeOldSegments() {
@@ -529,5 +549,5 @@ func (l *Log[T]) respondToWaiters(err error) {
 		w.done <- err
 	}
 
-	l.waiters = []Waiter{}
+	l.waiters = l.waiters[:0]
 }
