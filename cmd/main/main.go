@@ -11,7 +11,7 @@ func main() {
 	// - "data" is the directory where segment files will be stored.
 	// - 64<<20 sets the maximum size of each segment file to 64 MB.
 	//   Once a segment reaches this limit, a new segment will be created automatically.
-	log := golog.NewLog[any]("data", 64<<20)
+	log := golog.NewLog("data", 64<<20)
 
 	// Load any existing segments from disk.
 	// This step makes the log durable across restarts: previously written data can be read again.

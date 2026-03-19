@@ -1,40 +1,26 @@
 package golog
 
-import (
-	"bytes"
-	"hash/crc32"
-)
+import "hash/crc32"
 
 type Entry struct {
 	Header EntryHeader
 	Data   []byte
 }
 
-func NewEntry(data []byte, index uint64) (*Entry, error) {
-	length := len(data)
-
-	checksum := crc32.ChecksumIEEE(data)
-
+func NewEntry(data []byte, index uint64) *Entry {
 	return &Entry{
 		Header: EntryHeader{
-			Length:   uint64(length),
-			Checksum: checksum,
+			Length:   uint64(len(data)),
+			Checksum: crc32.ChecksumIEEE(data),
 			Index:    index,
 		},
 		Data: data,
-	}, nil
+	}
 }
 
-func (e *Entry) ToBytes() ([]byte, error) {
-	var buffer bytes.Buffer
-
-	if _, err := buffer.Write(e.Header.ToBytes()); err != nil {
-		return nil, err
-	}
-
-	if _, err := buffer.Write(e.Data); err != nil {
-		return nil, err
-	}
-
-	return buffer.Bytes(), nil
+func (e *Entry) ToBytes() []byte {
+	b := make([]byte, EntryHeaderSize+len(e.Data))
+	e.Header.PutBytes(b[:EntryHeaderSize])
+	copy(b[EntryHeaderSize:], e.Data)
+	return b
 }
