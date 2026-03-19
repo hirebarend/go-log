@@ -29,11 +29,9 @@ type Segment struct {
 
 func NewSegment(name string) (*Segment, error) {
 	base := filepath.Base(name)
-
 	startIndexStr := strings.TrimSuffix(base, filepath.Ext(base))
 
 	startIndex, err := strconv.ParseUint(startIndexStr, 10, 64)
-
 	if err != nil {
 		return nil, err
 	}
@@ -42,10 +40,8 @@ func NewSegment(name string) (*Segment, error) {
 		Cache:          []uint64{},
 		CommittedIndex: startIndex,
 		EndIndex:       0,
-		File:           nil,
 		Name:           name,
 		StartIndex:     startIndex,
-		Writer:         nil,
 	}
 
 	if err := segment.open(); err != nil {
@@ -63,24 +59,20 @@ func (s *Segment) Close() error {
 		if err := s.Writer.Flush(); err != nil {
 			return err
 		}
+		s.Writer = nil
 	}
-
-	s.Writer = nil
 
 	if s.File != nil {
 		if err := s.File.Sync(); err != nil {
 			return err
 		}
-
 		if err := s.File.Close(); err != nil {
 			return err
 		}
-
 		s.File = nil
 	}
 
 	s.Cache = nil
-
 	return nil
 }
 
@@ -121,38 +113,20 @@ func (s *Segment) Delete() error {
 		if err := s.Writer.Flush(); err != nil {
 			return err
 		}
+		s.Writer = nil
 	}
-
-	s.Writer = nil
 
 	if s.File != nil {
 		if err := s.File.Sync(); err != nil {
 			return err
 		}
-
 		if err := s.File.Close(); err != nil {
 			return err
 		}
-
 		s.File = nil
 	}
 
-	if err := os.Remove(s.Name); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (s *Segment) Open() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if err := s.open(); err != nil {
-		return err
-	}
-
-	return nil
+	return os.Remove(s.Name)
 }
 
 func (s *Segment) Read(index uint64) ([]byte, error) {
@@ -175,31 +149,23 @@ func (s *Segment) Read(index uint64) ([]byte, error) {
 
 	if s.Cache != nil {
 		i := int(index - s.StartIndex)
-
 		if i < 0 || i >= len(s.Cache) {
 			return nil, fmt.Errorf("index %d not found in segment", index)
 		}
 
-		offset := s.Cache[i]
-
-		entry, err := s.readEntryAtOffset(offset)
-
+		entry, err := s.readEntryAtOffset(s.Cache[i])
 		if err != nil {
 			return nil, err
 		}
-
 		return entry.Data, nil
 	}
 
-	var offset uint64 = 0
-
+	var offset uint64
 	for {
 		entryHeader, err := s.readEntryHeaderAtOffset(offset)
-
 		if err == io.EOF {
 			return nil, fmt.Errorf("index %d not found in segment", index)
 		}
-
 		if err != nil {
 			return nil, err
 		}
@@ -207,16 +173,14 @@ func (s *Segment) Read(index uint64) ([]byte, error) {
 		switch {
 		case entryHeader.Index == index:
 			entry, err := s.readEntryAtOffset(offset)
-
 			if err != nil {
 				return nil, err
 			}
-
 			return entry.Data, nil
 		case entryHeader.Index > index:
 			return nil, fmt.Errorf("index %d not found in segment", index)
 		default:
-			offset = offset + EntryHeaderSize + entryHeader.Length
+			offset += EntryHeaderSize + entryHeader.Length
 		}
 	}
 }
@@ -237,15 +201,12 @@ func (s *Segment) Truncate(index uint64) error {
 		return fmt.Errorf("truncate index %d out of segment range [%d,%d]", index, s.StartIndex, s.EndIndex)
 	}
 
-	var offset uint64 = 0
-
+	var offset uint64
 	for {
 		entryHeader, err := s.readEntryHeaderAtOffset(offset)
-
 		if err == io.EOF {
 			break
 		}
-
 		if err != nil {
 			return err
 		}
@@ -254,53 +215,38 @@ func (s *Segment) Truncate(index uint64) error {
 			if err := s.File.Truncate(int64(offset)); err != nil {
 				return err
 			}
-
 			if _, err := s.File.Seek(0, io.SeekEnd); err != nil {
 				return err
 			}
 
 			s.size.Store(offset)
 
-			if offset == 0 {
+			if offset == 0 || entryHeader.Index == 0 {
 				s.EndIndex = 0
 				s.CommittedIndex = 0
-
 				if s.Cache != nil {
-					s.Cache = []uint64{}
+					s.Cache = s.Cache[:0]
 				}
 			} else {
-				if entryHeader.Index > 0 {
-					s.CommittedIndex = entryHeader.Index - 1
-					s.EndIndex = entryHeader.Index - 1
-
-					if s.Cache != nil {
-						newLen := int(s.EndIndex - s.StartIndex + 1)
-						if newLen < 0 {
-							newLen = 0
-						}
-
-						if newLen > len(s.Cache) {
-							newLen = len(s.Cache)
-						}
-
-						s.Cache = s.Cache[:newLen]
+				s.CommittedIndex = entryHeader.Index - 1
+				s.EndIndex = entryHeader.Index - 1
+				if s.Cache != nil {
+					newLen := int(s.EndIndex - s.StartIndex + 1)
+					if newLen < 0 {
+						newLen = 0
 					}
-				} else {
-					s.CommittedIndex = 0
-					s.EndIndex = 0
-
-					if s.Cache != nil {
-						s.Cache = []uint64{}
+					if newLen > len(s.Cache) {
+						newLen = len(s.Cache)
 					}
+					s.Cache = s.Cache[:newLen]
 				}
 			}
 
 			s.Writer.Reset(s.File)
-
 			return nil
 		}
 
-		offset = offset + EntryHeaderSize + entryHeader.Length
+		offset += EntryHeaderSize + entryHeader.Length
 	}
 
 	return nil
@@ -314,25 +260,15 @@ func (s *Segment) Write(data []byte) (uint64, error) {
 		return 0, err
 	}
 
-	index := uint64(0)
-
+	var index uint64
 	if s.EndIndex == 0 {
 		index = s.StartIndex
 	} else {
 		index = s.EndIndex + 1
 	}
 
-	entry, err := NewEntry(data, index)
-
-	if err != nil {
-		return 0, err
-	}
-
-	b, err := entry.ToBytes()
-
-	if err != nil {
-		return 0, err
-	}
+	entry := NewEntry(data, index)
+	b := entry.ToBytes()
 
 	if _, err := s.Writer.Write(b); err != nil {
 		return 0, err
@@ -351,28 +287,23 @@ func (s *Segment) Write(data []byte) (uint64, error) {
 func (s *Segment) open() error {
 	if s.File == nil {
 		directory := filepath.Dir(s.Name)
-
 		if err := os.MkdirAll(directory, 0o755); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", directory, err)
 		}
 
 		file, err := os.OpenFile(s.Name, os.O_CREATE|os.O_RDWR, 0o644)
-
 		if err != nil {
 			return err
 		}
 
 		if _, err := file.Seek(0, io.SeekEnd); err != nil {
 			file.Close()
-
 			return err
 		}
 
 		stat, err := file.Stat()
-
 		if err != nil {
 			file.Close()
-
 			return err
 		}
 
@@ -380,15 +311,12 @@ func (s *Segment) open() error {
 		s.size.Store(uint64(stat.Size()))
 
 		if s.size.Load() != 0 {
-			var offset uint64 = 0
-
+			var offset uint64
 			for {
 				header, err := s.readEntryHeaderAtOffset(offset)
-
 				if err == io.EOF {
 					break
 				}
-
 				if err != nil {
 					return err
 				}
@@ -400,7 +328,7 @@ func (s *Segment) open() error {
 					s.Cache = append(s.Cache, offset)
 				}
 
-				offset = offset + EntryHeaderSize + header.Length
+				offset += EntryHeaderSize + header.Length
 			}
 		}
 	}
@@ -414,21 +342,15 @@ func (s *Segment) open() error {
 
 func (s *Segment) readEntryAtOffset(offset uint64) (*Entry, error) {
 	entryHeader, err := s.readEntryHeaderAtOffset(offset)
-
 	if err != nil {
 		return nil, err
 	}
 
 	data := make([]byte, entryHeader.Length)
 	n, err := s.File.ReadAt(data, int64(offset+EntryHeaderSize))
-
-	if err != nil {
-		if err == io.EOF && n == int(entryHeader.Length) {
-		} else {
-			return nil, err
-		}
+	if err != nil && !(err == io.EOF && n == int(entryHeader.Length)) {
+		return nil, err
 	}
-
 	if n != int(entryHeader.Length) {
 		return nil, io.ErrUnexpectedEOF
 	}
@@ -438,34 +360,29 @@ func (s *Segment) readEntryAtOffset(offset uint64) (*Entry, error) {
 	}
 
 	return &Entry{
-		Header: *entryHeader,
+		Header: entryHeader,
 		Data:   data,
 	}, nil
 }
 
-func (s *Segment) readEntryHeaderAtOffset(offset uint64) (*EntryHeader, error) {
+func (s *Segment) readEntryHeaderAtOffset(offset uint64) (EntryHeader, error) {
 	if offset >= s.size.Load() {
-		return nil, io.EOF
+		return EntryHeader{}, io.EOF
 	}
 
-	data := make([]byte, EntryHeaderSize)
-	n, err := s.File.ReadAt(data, int64(offset))
-
+	var buf [EntryHeaderSize]byte
+	n, err := s.File.ReadAt(buf[:], int64(offset))
 	if err != nil {
 		if err == io.EOF && n == 0 {
-			return nil, io.EOF
+			return EntryHeader{}, io.EOF
 		}
-
-		if n < int(EntryHeaderSize) {
-			return nil, io.ErrUnexpectedEOF
+		if n < EntryHeaderSize {
+			return EntryHeader{}, io.ErrUnexpectedEOF
 		}
 	}
-
-	if n < int(EntryHeaderSize) {
-		return nil, io.ErrUnexpectedEOF
+	if n < EntryHeaderSize {
+		return EntryHeader{}, io.ErrUnexpectedEOF
 	}
 
-	entryHeader := NewEntryHeaderFromBytes(data)
-
-	return &entryHeader, nil
+	return NewEntryHeaderFromBytes(buf[:]), nil
 }
