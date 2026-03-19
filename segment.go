@@ -221,7 +221,7 @@ func (s *Segment) Truncate(index uint64) error {
 
 			s.size.Store(offset)
 
-			if offset == 0 || entryHeader.Index == 0 {
+			if offset == 0 {
 				s.EndIndex = 0
 				s.CommittedIndex = 0
 				if s.Cache != nil {
