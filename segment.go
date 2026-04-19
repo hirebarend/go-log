@@ -38,7 +38,7 @@ func NewSegment(name string) (*Segment, error) {
 
 	segment := &Segment{
 		Cache:          []uint64{},
-		CommittedIndex: startIndex,
+		CommittedIndex: 0,
 		EndIndex:       0,
 		Name:           name,
 		StartIndex:     startIndex,
