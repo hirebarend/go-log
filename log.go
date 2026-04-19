@@ -96,7 +96,7 @@ func (l *Log) GetCommittedIndex() (uint64, error) {
 		committedIndex := segment.CommittedIndex
 		segment.mu.RUnlock()
 
-		if committedIndex != 0 {
+		if committedIndex >= segment.StartIndex {
 			return committedIndex, nil
 		}
 	}
@@ -118,7 +118,7 @@ func (l *Log) GetLastIndex() (uint64, error) {
 		endIndex := segment.EndIndex
 		segment.mu.RUnlock()
 
-		if endIndex != 0 {
+		if endIndex >= segment.StartIndex {
 			return endIndex, nil
 		}
 	}
@@ -234,7 +234,7 @@ func (l *Log) TruncateTo(index uint64) error {
 
 	var segments []*Segment
 	for i, segment := range l.Segments {
-		if segment.EndIndex != 0 && segment.EndIndex <= index {
+		if segment.EndIndex >= segment.StartIndex && segment.EndIndex <= index {
 			if err := segment.Delete(); err != nil {
 				l.mu.Unlock()
 				return err
