@@ -147,22 +147,26 @@ func (s *Segment) Read(index uint64) ([]byte, error) {
 		s.dirty = false
 	}
 
+	// Downgrade: capture values under exclusive lock, then switch to RLock.
+	endIndex := s.EndIndex
+	startIndex := s.StartIndex
+	cache := s.Cache
 	s.mu.Unlock()
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if index < s.StartIndex || index > s.EndIndex {
-		return nil, fmt.Errorf("read index %d out of segment range [%d,%d]", index, s.StartIndex, s.EndIndex)
+	if index < startIndex || index > endIndex {
+		return nil, fmt.Errorf("read index %d out of segment range [%d,%d]", startIndex, startIndex, endIndex)
 	}
 
-	if s.Cache != nil {
-		i := int(index - s.StartIndex)
-		if i < 0 || i >= len(s.Cache) {
+	if cache != nil {
+		i := int(index - startIndex)
+		if i < 0 || i >= len(cache) {
 			return nil, fmt.Errorf("index %d not found in segment", index)
 		}
 
-		entry, err := s.readEntryAtOffset(s.Cache[i])
+		entry, err := s.readEntryAtOffset(cache[i])
 		if err != nil {
 			return nil, err
 		}
@@ -291,7 +295,8 @@ func (s *Segment) Write(data []byte) (uint64, error) {
 		Index:    index,
 	}
 
-	// Write header directly to bufio.Writer using a stack-allocated buffer.
+	// Write header directly to bufio.Writer using a stack-allocated buffer,
+	// avoiding the per-write heap allocation from Entry.ToBytes().
 	var hdrBuf [EntryHeaderSize]byte
 	header.PutBytes(hdrBuf[:])
 	if _, err := s.Writer.Write(hdrBuf[:]); err != nil {
@@ -366,8 +371,7 @@ func (s *Segment) open() error {
 					s.Cache = append(s.Cache, offset)
 				}
 
-				skip := int64(header.Length)
-				if _, err := br.Discard(int(skip)); err != nil {
+				if _, err := io.CopyN(io.Discard, br, int64(header.Length)); err != nil {
 					return err
 				}
 				offset += EntryHeaderSize + header.Length
