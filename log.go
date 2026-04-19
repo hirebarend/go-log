@@ -90,12 +90,18 @@ func (l *Log) GetCommittedIndex() (uint64, error) {
 		return 0, nil
 	}
 
-	segment := l.Segments[len(l.Segments)-1]
-	segment.mu.RLock()
-	committedIndex := segment.CommittedIndex
-	segment.mu.RUnlock()
+	for i := len(l.Segments) - 1; i >= 0; i-- {
+		segment := l.Segments[i]
+		segment.mu.RLock()
+		committedIndex := segment.CommittedIndex
+		segment.mu.RUnlock()
 
-	return committedIndex, nil
+		if committedIndex >= segment.StartIndex {
+			return committedIndex, nil
+		}
+	}
+
+	return 0, nil
 }
 
 func (l *Log) GetLastIndex() (uint64, error) {
@@ -106,12 +112,18 @@ func (l *Log) GetLastIndex() (uint64, error) {
 		return 0, nil
 	}
 
-	segment := l.Segments[len(l.Segments)-1]
-	segment.mu.RLock()
-	endIndex := segment.EndIndex
-	segment.mu.RUnlock()
+	for i := len(l.Segments) - 1; i >= 0; i-- {
+		segment := l.Segments[i]
+		segment.mu.RLock()
+		endIndex := segment.EndIndex
+		segment.mu.RUnlock()
 
-	return endIndex, nil
+		if endIndex >= segment.StartIndex {
+			return endIndex, nil
+		}
+	}
+
+	return 0, nil
 }
 
 func (l *Log) Load() error {
@@ -222,7 +234,7 @@ func (l *Log) TruncateTo(index uint64) error {
 
 	var segments []*Segment
 	for i, segment := range l.Segments {
-		if segment.EndIndex <= index {
+		if segment.EndIndex >= segment.StartIndex && segment.EndIndex <= index {
 			if err := segment.Delete(); err != nil {
 				l.mu.Unlock()
 				return err
