@@ -20,6 +20,7 @@ type Segment struct {
 	Cache          []uint64
 	CommittedIndex uint64
 	EndIndex       uint64
+	dirty          bool
 	mu             sync.RWMutex
 	Name           string
 	size           atomic.Uint64
@@ -90,10 +91,11 @@ func (s *Segment) Commit() error {
 		if err := s.Writer.Flush(); err != nil {
 			return err
 		}
+		s.dirty = false
 	}
 
 	if s.File != nil {
-		if err := s.File.Sync(); err != nil {
+		if err := fdatasync(s.File); err != nil {
 			return err
 		}
 	}
@@ -131,17 +133,24 @@ func (s *Segment) Delete() error {
 
 func (s *Segment) Read(index uint64) ([]byte, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if err := s.open(); err != nil {
+		s.mu.Unlock()
 		return nil, err
 	}
 
-	if s.Writer != nil {
+	if s.dirty && s.Writer != nil {
 		if err := s.Writer.Flush(); err != nil {
+			s.mu.Unlock()
 			return nil, err
 		}
+		s.dirty = false
 	}
+
+	s.mu.Unlock()
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	if index < s.StartIndex || index > s.EndIndex {
 		return nil, fmt.Errorf("read index %d out of segment range [%d,%d]", index, s.StartIndex, s.EndIndex)
@@ -193,8 +202,11 @@ func (s *Segment) Truncate(index uint64) error {
 		return err
 	}
 
-	if err := s.Writer.Flush(); err != nil {
-		return err
+	if s.Writer != nil {
+		if err := s.Writer.Flush(); err != nil {
+			return err
+		}
+		s.dirty = false
 	}
 
 	if index < s.StartIndex || index > s.EndIndex {
@@ -242,7 +254,9 @@ func (s *Segment) Truncate(index uint64) error {
 				}
 			}
 
-			s.Writer.Reset(s.File)
+			if s.Writer != nil {
+				s.Writer.Reset(s.File)
+			}
 			return nil
 		}
 
@@ -260,6 +274,10 @@ func (s *Segment) Write(data []byte) (uint64, error) {
 		return 0, err
 	}
 
+	if s.Writer == nil {
+		s.Writer = bufio.NewWriterSize(s.File, segmentBufferSize)
+	}
+
 	var index uint64
 	if s.EndIndex == 0 {
 		index = s.StartIndex
@@ -267,10 +285,19 @@ func (s *Segment) Write(data []byte) (uint64, error) {
 		index = s.EndIndex + 1
 	}
 
-	entry := NewEntry(data, index)
-	b := entry.ToBytes()
+	header := EntryHeader{
+		Length:   uint64(len(data)),
+		Checksum: crc32.ChecksumIEEE(data),
+		Index:    index,
+	}
 
-	if _, err := s.Writer.Write(b); err != nil {
+	// Write header directly to bufio.Writer using a stack-allocated buffer.
+	var hdrBuf [EntryHeaderSize]byte
+	header.PutBytes(hdrBuf[:])
+	if _, err := s.Writer.Write(hdrBuf[:]); err != nil {
+		return 0, err
+	}
+	if _, err := s.Writer.Write(data); err != nil {
 		return 0, err
 	}
 
@@ -278,10 +305,11 @@ func (s *Segment) Write(data []byte) (uint64, error) {
 		s.Cache = append(s.Cache, s.size.Load())
 	}
 
-	s.EndIndex = entry.Header.Index
-	s.size.Add(uint64(len(b)))
+	s.dirty = true
+	s.EndIndex = index
+	s.size.Add(EntryHeaderSize + uint64(len(data)))
 
-	return entry.Header.Index, nil
+	return index, nil
 }
 
 func (s *Segment) open() error {
@@ -311,15 +339,25 @@ func (s *Segment) open() error {
 		s.size.Store(uint64(stat.Size()))
 
 		if s.size.Load() != 0 {
+			// Use a buffered reader for sequential header scanning instead of
+			// individual pread syscalls per entry.
+			if _, err := file.Seek(0, io.SeekStart); err != nil {
+				return err
+			}
+			br := bufio.NewReaderSize(file, segmentBufferSize)
 			var offset uint64
+			var hdrBuf [EntryHeaderSize]byte
 			for {
-				header, err := s.readEntryHeaderAtOffset(offset)
-				if err == io.EOF {
+				if offset >= s.size.Load() {
 					break
 				}
-				if err != nil {
+				if _, err := io.ReadFull(br, hdrBuf[:]); err != nil {
+					if err == io.EOF || err == io.ErrUnexpectedEOF {
+						break
+					}
 					return err
 				}
+				header := NewEntryHeaderFromBytes(hdrBuf[:])
 
 				s.CommittedIndex = header.Index
 				s.EndIndex = header.Index
@@ -328,14 +366,21 @@ func (s *Segment) open() error {
 					s.Cache = append(s.Cache, offset)
 				}
 
+				skip := int64(header.Length)
+				if _, err := br.Discard(int(skip)); err != nil {
+					return err
+				}
 				offset += EntryHeaderSize + header.Length
+			}
+
+			// Seek back to end for future writes.
+			if _, err := file.Seek(0, io.SeekEnd); err != nil {
+				return err
 			}
 		}
 	}
 
-	if s.Writer == nil {
-		s.Writer = bufio.NewWriterSize(s.File, segmentBufferSize)
-	}
+	// Writer is created lazily on first Write, not here.
 
 	return nil
 }
